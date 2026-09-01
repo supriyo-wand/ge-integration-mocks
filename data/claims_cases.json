@@ -253,7 +253,7 @@
       "medishield_covered_sgd": 7200.00,
       "insurer_liable_sgd": 11420.00,
       "procedures": ["ORIF tibial plateau", "Physiotherapy inpatient"],
-      "attached_documents": ["Discharge_Summary.pdf", "Bill.pdf"],
+      "attached_documents": ["Discharge_Summary.pdf", "Bill.pdf", "Police_Incident_Report.pdf"],
       "ground_truth": {
         "contestability_trigger": true,
         "policy_age_months": 8.5,
