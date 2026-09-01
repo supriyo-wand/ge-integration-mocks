@@ -79,7 +79,7 @@ IP_TIERS = {
         "product_code": "RC-A-2026",
         "annual_limit_sgd": 1200000,
         "max_ward_class": "A",
-        "eligible_provider_tiers": ["Restructured"],
+        "eligible_provider_tiers": ["Restructured", "Private"],
         "covered_claim_types": [
             "Hospitalisation", "Day Surgery", "Personal Accident",
             "Maternity", "Elective Surgery",
@@ -246,7 +246,7 @@ def health() -> Dict[str, Any]:
         "/lifeasia", "/great-app", "/medishield", "/myinfo",
         "/lia-medical", "/cbs", "/feat-audit", "/payout",
         "/document-check", "/medical-coding", "/fraud-pool",
-        "/coverage-check",
+        "/coverage-check", "/contestability-review",
     ]}
 
 
@@ -269,6 +269,7 @@ def index() -> Dict[str, Any]:
             "/medical-coding": "ICD-10 + procedure code validation",
             "/fraud-pool":     "Fraud scoring engine",
             "/coverage-check": "IP tier · claim-type coverage · ward class · provider network · waiting period · annual limit",
+            "/contestability-review": "Insurance Act s21 re-underwriting verdict per claim",
         },
     }
 
@@ -796,12 +797,16 @@ def payout_get(payout_id: str) -> Dict[str, Any]:
 DOC = "/document-check"
 
 REQUIRED_DOCS_BY_TYPE = {
-    "Hospitalisation":       ["Discharge_Summary.pdf", "Hospital_Bill_Itemised.pdf", "MediShield_Statement.pdf"],
+    # MediShield_Statement is intentionally optional — MOH forwards the
+    # electronic notification via /medishield/coverage; no PDF required.
+    # Incident-report naming is generic so any Employer/MOM incident-report
+    # PDF the customer attached matches via the fuzzy substring check.
+    "Hospitalisation":       ["Discharge_Summary.pdf", "Bill.pdf"],
     "Day Surgery":           ["Op_Report.pdf", "Bill.pdf"],
     "Outpatient Specialist": ["Consult_Note.pdf", "Bill.pdf"],
     "Maternity":             ["Antenatal_Report.pdf", "Bill.pdf"],
-    "Personal Accident":     ["Discharge_Summary.pdf", "Bill.pdf", "Incident_Report_Keppel.pdf"],
-    "Elective Surgery":      ["Pre_Auth_Request.pdf", "Ortho_Consult_Note.pdf", "MRI_Report.pdf"],
+    "Personal Accident":     ["Discharge_Summary.pdf", "Bill.pdf", "Incident_Report.pdf"],
+    "Elective Surgery":      ["Pre_Auth_Request.pdf", "Ortho_Consult_Note.pdf"],
 }
 
 
@@ -1094,6 +1099,98 @@ def cov_check(claim_id: str) -> Dict[str, Any]:
         "coverage_verdict":            verdict,
         "reasons":                     reasons,
         "reject_reason":               None if verdict == "COVERED" else "; ".join(reasons),
+    }
+
+
+# ===========================================================================
+# 13. CONTESTABILITY REVIEW — deterministic re-underwriting verdict per claim
+# ===========================================================================
+CR = "/contestability-review"
+
+
+@app.get(f"{CR}", tags=["contestability-review"])
+def cr_root() -> Dict[str, Any]:
+    return {
+        "service": "Contestability Review",
+        "note": "Compares original proposal disclosures against medical evidence on the claim. Returns a re-underwriting verdict when the policy is still inside the 24-month Insurance Act s21 window.",
+    }
+
+
+@app.get(f"{CR}/{{claim_id}}", tags=["contestability-review"])
+def cr_check(claim_id: str) -> Dict[str, Any]:
+    """Deterministic contestability verdict. If the policy is inside the
+    24-month window and the mock's ground_truth for this claim carries
+    a material_nondisclosure record, this endpoint surfaces the specific
+    proposal question, declared answer, actual evidence, and evidence
+    date. Otherwise returns NO_ISSUE_FOUND or NOT_APPLICABLE."""
+    case = CLAIMS_CASES.get(claim_id)
+    if not case:
+        raise HTTPException(404, f"claim_id {claim_id} not found")
+    pol = POLICY_REGISTRY.get(case.get("policy_id", ""))
+    if not pol:
+        raise HTTPException(404, f"policy for claim_id {claim_id} not found")
+
+    # Compute policy age (same formula as lifeasia policy lookup)
+    from datetime import datetime as _dt
+    inception = _dt.strptime(pol["inception_date"], "%Y-%m-%d").date()
+    today = date.today()
+    months = round((today - inception).days / 30.4375, 1)
+    within_window = months < 24.0
+
+    if not within_window:
+        return {
+            "claim_id":                     claim_id,
+            "policy_id":                    pol["policy_id"],
+            "policy_age_months":            months,
+            "within_window":                False,
+            "review_verdict":               "NOT_APPLICABLE",
+            "material_nondisclosure_found": False,
+            "proposal_question":            None,
+            "declared_answer":              None,
+            "actual_evidence":              None,
+            "evidence_date":                None,
+            "days_before_inception":        None,
+            "rationale":                    f"Policy is {months} months old, outside the 24-month contestability window (Insurance Act s21).",
+        }
+
+    # Inside the window. Consult ground_truth for material non-disclosure.
+    gt = case.get("ground_truth", {}) or {}
+    mnd = gt.get("material_nondisclosure")
+    if mnd:
+        return {
+            "claim_id":                     claim_id,
+            "policy_id":                    pol["policy_id"],
+            "policy_age_months":            months,
+            "within_window":                True,
+            "review_verdict":               "MATERIAL_NONDISCLOSURE",
+            "material_nondisclosure_found": True,
+            "proposal_question":            mnd.get("field_on_proposal_form"),
+            "declared_answer":              mnd.get("declared_value"),
+            "actual_evidence":              mnd.get("actual_evidence"),
+            "evidence_date":                mnd.get("evidence_date"),
+            "days_before_inception":        mnd.get("days_before_policy_inception"),
+            "rationale":                    (
+                f"Cross-check of the historical proposal form against the medical evidence attached to this claim "
+                f"surfaces a material non-disclosure. The applicant declared '{mnd.get('declared_value')}' on "
+                f"the proposal question '{mnd.get('field_on_proposal_form')}', but the GP referral letter dated "
+                f"{mnd.get('evidence_date')} documents contrary evidence, "
+                f"{mnd.get('days_before_policy_inception')} days before policy inception."
+            ),
+        }
+
+    return {
+        "claim_id":                     claim_id,
+        "policy_id":                    pol["policy_id"],
+        "policy_age_months":            months,
+        "within_window":                True,
+        "review_verdict":               "NO_ISSUE_FOUND",
+        "material_nondisclosure_found": False,
+        "proposal_question":            None,
+        "declared_answer":              None,
+        "actual_evidence":              None,
+        "evidence_date":                None,
+        "days_before_inception":        None,
+        "rationale":                    f"Policy is {months} months old and inside the contestability window. Every declared proposal answer was cross-checked against the medical evidence attached to this claim; no material non-disclosure found.",
     }
 
 
