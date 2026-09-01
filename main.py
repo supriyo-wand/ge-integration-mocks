@@ -159,24 +159,28 @@ def health() -> Dict[str, Any]:
     return {"status": "ok", "at": _now(), "services": [
         "/lifeasia", "/great-app", "/medishield", "/myinfo",
         "/lia-medical", "/cbs", "/feat-audit", "/payout",
+        "/document-check", "/medical-coding", "/fraud-pool",
     ]}
 
 
 @app.get("/", tags=["_meta"])
 def index() -> Dict[str, Any]:
     return {
-        "app": "GE Integration Mocks",
+        "app": "Insurance Integration Mocks",
         "docs": "/docs",
         "openapi": "/openapi.json",
         "services": {
             "/lifeasia": "LifeAsia policy admin (policy lookup, proposal archive)",
-            "/great-app": "Great Eastern App claim intake (FNOL submission)",
+            "/great-app": "Customer app claim intake (FNOL submission + status)",
             "/medishield": "MOH MediShield Life electronic feed",
             "/myinfo": "Singpass MyInfo identity + income verification",
             "/lia-medical": "LIA Guide to Medical Underwriting rating lookup",
             "/cbs": "Credit Bureau Singapore financial underwriting pull",
             "/feat-audit": "MAS FEAT audit trail sink",
             "/payout": "GIRO / PayNow disbursement",
+            "/document-check": "Document completeness check per claim",
+            "/medical-coding": "ICD-10 + procedure code validation",
+            "/fraud-pool": "Fraud scoring engine",
         },
     }
 
@@ -696,6 +700,201 @@ def payout_get(payout_id: str) -> Dict[str, Any]:
     if not p:
         raise HTTPException(404, f"payout_id {payout_id} not found")
     return p
+
+
+# ===========================================================================
+# 9. DOCUMENT CHECK — completeness of attached FNOL documents
+# ===========================================================================
+DOC = "/document-check"
+
+REQUIRED_DOCS_BY_TYPE = {
+    "Hospitalisation":       ["Discharge_Summary.pdf", "Hospital_Bill_Itemised.pdf", "MediShield_Statement.pdf"],
+    "Day Surgery":           ["Op_Report.pdf", "Bill.pdf"],
+    "Outpatient Specialist": ["Consult_Note.pdf", "Bill.pdf"],
+    "Maternity":             ["Antenatal_Report.pdf", "Bill.pdf"],
+    "Personal Accident":     ["Discharge_Summary.pdf", "Bill.pdf", "Incident_Report_Keppel.pdf"],
+    "Elective Surgery":      ["Pre_Auth_Request.pdf", "Ortho_Consult_Note.pdf", "MRI_Report.pdf"],
+}
+
+
+@app.get(f"{DOC}", tags=["document-check"])
+def doc_root() -> Dict[str, Any]:
+    return {"service": "Document Completeness Check"}
+
+
+@app.get(f"{DOC}/{{claim_id}}", tags=["document-check"])
+def doc_check(claim_id: str) -> Dict[str, Any]:
+    """Verify that the FNOL submission has every document required for its
+    claim type. Returns present + missing lists and a complete flag."""
+    case = CLAIMS_CASES.get(claim_id)
+    if not case:
+        raise HTTPException(404, f"claim_id {claim_id} not found")
+    claim_type = case.get("claim_type", "")
+    required = REQUIRED_DOCS_BY_TYPE.get(claim_type, ["Bill.pdf"])
+    attached = case.get("attached_documents", []) or []
+    # Case-insensitive substring match: attached "Bill.pdf" satisfies required "Hospital_Bill_Itemised.pdf" only if the tokens overlap.
+    def _matches(req: str, atts: List[str]) -> bool:
+        req_l = req.lower()
+        for a in atts:
+            a_l = a.lower()
+            if a_l == req_l:
+                return True
+            if req_l.split(".")[0] in a_l or a_l.split(".")[0] in req_l:
+                return True
+        return False
+    present = [r for r in required if _matches(r, attached)]
+    missing = [r for r in required if r not in present]
+    return {
+        "claim_id":         claim_id,
+        "claim_type":       claim_type,
+        "required_docs":    required,
+        "attached_docs":    attached,
+        "present":          present,
+        "missing":          missing,
+        "complete":         len(missing) == 0,
+        "reject_reason":    None if not missing else f"Missing required documents: {', '.join(missing)}",
+    }
+
+
+# ===========================================================================
+# 10. MEDICAL CODING — ICD-10 + procedure code validation
+# ===========================================================================
+MED = "/medical-coding"
+
+# Known ICD-10 codes we recognise. All other codes come back INVALID.
+KNOWN_ICD10 = {
+    "I21.0": "STEMI · anterior wall", "M50.10": "Cervical spondylosis with radiculopathy",
+    "Z34.03": "Antenatal care · 34 weeks", "S66.902A": "Lacerated hand · tendon injury",
+    "H52.13": "Refractive error · myopia", "E10.10": "Type 1 diabetic ketoacidosis",
+    "T22.311A": "Full-thickness thermal burn · forearm", "K35.80": "Acute appendicitis",
+    "S82.109A": "Tibial plateau fracture", "S83.211A": "Medial meniscus tear",
+}
+
+# Procedure/procedure-family flags. LASIK on H52.13 is flagged as an
+# elective/cosmetic exclusion — the workflow uses this to auto-decline.
+ELECTIVE_ICD_FLAGS = {
+    "H52.13": {"category": "refractive/cosmetic", "excluded_under_ip": True, "note": "LASIK/refractive surgery excluded under IP plan schedule 4.2"},
+}
+
+
+@app.get(f"{MED}", tags=["medical-coding"])
+def med_root() -> Dict[str, Any]:
+    return {"service": "Medical Coding Validator", "reference": "ICD-10 · Singapore MOH billing schema"}
+
+
+@app.get(f"{MED}/validate/{{claim_id}}", tags=["medical-coding"])
+def med_validate(claim_id: str) -> Dict[str, Any]:
+    """Validate the ICD-10 primary code on this claim, check whether the
+    procedures listed are consistent with the diagnosis, and flag any
+    exclusion category the diagnosis falls under."""
+    case = CLAIMS_CASES.get(claim_id)
+    if not case:
+        raise HTTPException(404, f"claim_id {claim_id} not found")
+    icd = case.get("icd10_primary", "")
+    procs = case.get("procedures", []) or []
+    icd_known = icd in KNOWN_ICD10
+    flag = ELECTIVE_ICD_FLAGS.get(icd)
+    is_excluded = bool(flag and flag.get("excluded_under_ip"))
+    # very light consistency check — if diagnosis mentions burn, expect skin-graft-like procedure
+    consistency_note = "consistent"
+    diag_low = (case.get("diagnosis_primary") or "").lower()
+    proc_txt = " ".join(procs).lower()
+    if "burn" in diag_low and "graft" not in proc_txt and "escharotomy" not in proc_txt:
+        consistency_note = "diagnosis suggests grafting/escharotomy but not itemised in procedure list"
+    if "myocardial" in diag_low and not any(k in proc_txt for k in ("angio", "pci", "stent")):
+        consistency_note = "MI diagnosis without angio/PCI in procedures — review coding"
+    return {
+        "claim_id":                     claim_id,
+        "icd10_primary":                icd,
+        "icd10_description":            KNOWN_ICD10.get(icd, "unknown code"),
+        "icd10_valid":                  icd_known,
+        "procedures":                   procs,
+        "procedures_valid":             len(procs) > 0,
+        "code_consistency":             consistency_note,
+        "excluded_under_policy":        is_excluded,
+        "exclusion_reason":             (flag or {}).get("note"),
+        "reject_reason":                None if not is_excluded else (flag or {}).get("note"),
+    }
+
+
+# ===========================================================================
+# 11. FRAUD POOL — cross-claim scoring + watchlist
+# ===========================================================================
+FR = "/fraud-pool"
+
+
+class FraudScoreRequest(BaseModel):
+    claim_id: str
+
+
+@app.get(f"{FR}", tags=["fraud-pool"])
+def fraud_root() -> Dict[str, Any]:
+    return {"service": "Fraud Pool", "note": "Cross-claim pattern scoring + SIU watchlist"}
+
+
+@app.post(f"{FR}/score", tags=["fraud-pool"])
+def fraud_score(req: FraudScoreRequest) -> Dict[str, Any]:
+    """Deterministic fraud score. Uses claim + policyholder + provider
+    signals to produce a 0-100 risk score with a LOW/MEDIUM/HIGH band."""
+    case = CLAIMS_CASES.get(req.claim_id)
+    if not case:
+        raise HTTPException(404, f"claim_id {req.claim_id} not found")
+
+    reasons: List[str] = []
+    score = 10  # baseline
+
+    total = float(case.get("total_bill_sgd") or 0)
+    ins_liable = float(case.get("insurer_liable_sgd") or 0)
+    claim_type = case.get("claim_type", "")
+    provider = case.get("provider_code", "")
+
+    # Signal 1: large hospitalisation with high insurer share on a driver / high-mileage occupation
+    person = PEOPLE.get(case.get("person_id", ""), {})
+    if claim_type == "Hospitalisation" and total > 10000 and person.get("occupation_class") == "Class 3":
+        score += 35
+        reasons.append("Class 3 occupation with 4-day hospitalisation bill > SGD 10k")
+
+    # Signal 2: repeat DKA-like or high-cost admission signals a controlled DM patient with chronic pattern
+    diag = (case.get("diagnosis_primary") or "").lower()
+    if "ketoacidosis" in diag or "diabetic" in diag:
+        score += 20
+        reasons.append("DKA hospitalisation on declared T2DM policy — cross-claim pattern flag")
+
+    # Signal 3: elective / private-hospital cluster
+    if claim_type in ("Day Surgery", "Elective Surgery") and provider in ("MEH", "GHC", "RGH"):
+        score += 15
+        reasons.append(f"Elective procedure at private hospital {provider}")
+
+    # Signal 4: bill amount out of band for diagnosis
+    if "myocardial" in diag and total > 60000:
+        score += 5
+        reasons.append("MI bill on the high end of expected range")
+
+    # Signal 5: watchlist (deterministic hash of provider)
+    watchlist_hits: List[str] = []
+    if provider == "MEH":
+        watchlist_hits.append("provider watchlist: repeat elective escalations flagged this quarter")
+        score += 5
+
+    band = "LOW"
+    action = "PROCEED"
+    if score >= 50:
+        band = "HIGH"
+        action = "ROUTE_TO_SIU"
+    elif score >= 30:
+        band = "MEDIUM"
+        action = "REVIEW"
+
+    return {
+        "claim_id":                 req.claim_id,
+        "fraud_score":              score,
+        "risk_band":                band,
+        "recommended_action":       action,
+        "reasons":                  reasons,
+        "watchlist_hits":           watchlist_hits,
+        "similar_recent_claims":    0 if band == "LOW" else 2,
+        "reject_reason":            None,
+    }
 
 
 # ===========================================================================
