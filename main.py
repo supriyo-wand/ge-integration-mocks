@@ -1,25 +1,22 @@
 """
-GE Integration Mocks — a single FastAPI app hosting 8 mock services that
-stand in for the systems a Great Eastern claims or underwriting workflow
-would touch in production:
+Insurance Integration Mocks — a single FastAPI app hosting the services a
+Singapore IP insurer's claims and underwriting workflows would touch:
 
-  /lifeasia       LifeAsia policy admin (policy lookup, proposal-form archive)
-  /great-app      Great Eastern App claim intake (FNOL submission + status)
-  /medishield     MOH MediShield Life electronic feed (per-hospitalisation)
-  /myinfo         Singpass MyInfo identity + income verification
-  /lia-medical    LIA Guide to Medical Underwriting rating lookup
-  /cbs            Credit Bureau Singapore financial underwriting pull
-  /feat-audit     MAS FEAT audit trail sink
-  /payout         GIRO / PayNow disbursement
+  /lifeasia          LifeAsia policy admin (policy lookup, proposal archive)
+  /great-app         Customer app claim intake (FNOL submission + status)
+  /medishield        MOH MediShield Life electronic feed
+  /myinfo            Singpass MyInfo identity + income verification
+  /lia-medical       LIA Guide to Medical Underwriting rating lookup
+  /cbs               Credit Bureau Singapore financial underwriting pull
+  /feat-audit        MAS FEAT audit trail sink
+  /payout            GIRO / PayNow disbursement
+  /document-check    Document completeness check per claim
+  /medical-coding    ICD-10 + procedure code validation
+  /fraud-pool        Fraud scoring engine
+  /coverage-check    IP tier · claim type · ward class · provider network · waiting · annual limit
 
-None of these connect to real GE, MOH, LIA, or MAS systems. They serve
-static demo data seeded from data/*.json plus a small amount of in-memory
-state for submissions.
-
-Deterministic: every response for a given input is identical across calls.
-
-Endpoints per service are listed under /docs (Swagger UI). Every service
-also exposes a small liveness ping at its own root.
+Not connected to any real insurer, MOH, LIA, or MAS system. All records
+are synthetic. Deterministic: same input → same output on every call.
 """
 
 from __future__ import annotations
@@ -58,51 +55,139 @@ UW_CASES: Dict[str, Dict[str, Any]] = {c["application_id"]: c for c in UW_BLOB["
 CLAIMS_CASES: Dict[str, Dict[str, Any]] = {c["claim_id"]: c for c in CLAIMS_BLOB["cases"]}
 
 
-# In-force policies inferred from claims cases (policy_id -> synthesised record).
-# Underwriting proposals produce future policies (see APP-73007 which links to
-# an existing policy). This map is what /lifeasia serves.
+# ---------------------------------------------------------------------------
+# IP tier catalog (generic, no branded product names)
+# ---------------------------------------------------------------------------
+# Every IP claim is filed against one of these tiers. The coverage matrix
+# feeds /coverage-check and drives adjudication (tier-vs-claim-type fit,
+# ward class fit, provider network fit, annual limit).
+
+IP_TIERS = {
+    "PrivateShield Elite": {
+        "product_code": "PS-ELITE-2026",
+        "annual_limit_sgd": 1500000,
+        "max_ward_class": "A",
+        "eligible_provider_tiers": ["Private", "Restructured"],
+        "covered_claim_types": [
+            "Hospitalisation", "Day Surgery", "Outpatient Specialist",
+            "Personal Accident", "Maternity", "Elective Surgery",
+        ],
+        "waiting_periods_days": {"Maternity": 300, "Elective Surgery": 90},
+        "default_riders": ["CoverBoost Rider"],
+    },
+    "RestructuredCare A": {
+        "product_code": "RC-A-2026",
+        "annual_limit_sgd": 1200000,
+        "max_ward_class": "A",
+        "eligible_provider_tiers": ["Restructured"],
+        "covered_claim_types": [
+            "Hospitalisation", "Day Surgery", "Personal Accident",
+            "Maternity", "Elective Surgery",
+        ],
+        "waiting_periods_days": {"Maternity": 300, "Elective Surgery": 90},
+        "default_riders": [],
+    },
+    "RestructuredCare B": {
+        "product_code": "RC-B-2026",
+        "annual_limit_sgd": 800000,
+        "max_ward_class": "B1",
+        "eligible_provider_tiers": ["Restructured"],
+        "covered_claim_types": [
+            "Hospitalisation", "Day Surgery", "Personal Accident",
+        ],
+        "waiting_periods_days": {"Elective Surgery": 180},
+        "default_riders": [],
+    },
+    "BasicShield": {
+        "product_code": "BS-STD-2026",
+        "annual_limit_sgd": 300000,
+        "max_ward_class": "B2",
+        "eligible_provider_tiers": ["Restructured"],
+        "covered_claim_types": [
+            "Hospitalisation", "Personal Accident",
+        ],
+        "waiting_periods_days": {},
+        "default_riders": [],
+    },
+}
+
+
+def _tier_for_claim(claim: Dict[str, Any], person: Dict[str, Any]) -> str:
+    """Assign an IP tier to a policy based on claim signals in a stable
+    (deterministic) way. Ties the demo scenarios to concrete tiers so
+    coverage-check surfaces the right rejects."""
+    pid = claim["policy_id"]
+    person_id = claim["person_id"]
+
+    # Bridge case P-0007 holds PrivateShield Elite for 14 months.
+    if person_id == "P-0007":
+        return "PrivateShield Elite"
+    # Tan Wei Ming (P-0001) holds BasicShield only → his outpatient specialist claim
+    # for cervical spondylosis is NOT covered by that tier.
+    if person_id == "P-0001":
+        return "BasicShield"
+    # Chen Xiaolei (P-0004) — quant, high income → PrivateShield Elite
+    if person_id == "P-0004":
+        return "PrivateShield Elite"
+    # Suresh (P-0010) — construction PM, private hospital elective → PrivateShield Elite
+    if person_id == "P-0010":
+        return "PrivateShield Elite"
+    # Nurul (P-0002) — RN, maternity claim → RestructuredCare A (private-tier maternity)
+    if person_id == "P-0002":
+        return "RestructuredCare A"
+    # Priya (P-0006) — occupational burn → RestructuredCare A
+    if person_id == "P-0006":
+        return "RestructuredCare A"
+    # Farah (P-0008) — teacher, KKH appendectomy → RestructuredCare A
+    if person_id == "P-0008":
+        return "RestructuredCare A"
+    # Kevin (P-0009) — young marketing, motorbike RTA → RestructuredCare B
+    if person_id == "P-0009":
+        return "RestructuredCare B"
+    # Rajesh (P-0003) — marine engineer with declared occupation risk → RestructuredCare B
+    if person_id == "P-0003":
+        return "RestructuredCare B"
+    # Faizal (P-0005) — Grab driver on legacy tier → RestructuredCare B
+    if person_id == "P-0005":
+        return "RestructuredCare B"
+    return "RestructuredCare B"
+
+
 def _build_policy_registry() -> Dict[str, Dict[str, Any]]:
+    """Every in-force IP policy referenced by a claim, materialised with its
+    tier metadata so /lifeasia/policies and /coverage-check can serve
+    identical, consistent records."""
     registry: Dict[str, Dict[str, Any]] = {}
     for claim in CLAIMS_BLOB["cases"]:
         pid = claim["policy_id"]
         person = PEOPLE[claim["person_id"]]
+        tier_name = _tier_for_claim(claim, person)
+        tier = IP_TIERS[tier_name]
+        # Annual premium scales with tier
+        base_prem = {"PrivateShield Elite": 3600, "RestructuredCare A": 2400,
+                     "RestructuredCare B": 1600, "BasicShield": 900}[tier_name]
         registry[pid] = {
-            "policy_id": pid,
-            "person_id": claim["person_id"],
-            "policyholder_nric": person["nric"],
-            "policyholder_name": person["full_name"],
-            "product_code": "GE-LIVE-GREAT-FLEXI",
-            "product_family": "GREAT Flexi Living",
-            "coverage": ["Life", "Critical Illness"],
-            "sum_assured_sgd": 500000 + int(claim["policy_id"][-4:]) * 137 % 500000,
-            "inception_date": claim["policy_inception_date"],
-            "next_premium_due": "2026-11-30",
-            "annual_premium_sgd": 4800 + int(claim["policy_id"][-4:]) * 41 % 3000,
-            "status": "IN_FORCE",
-            "riders": ["Multiple Pay CI"] if int(claim["policy_id"][-2:]) % 2 == 0 else [],
+            "policy_id":            pid,
+            "person_id":            claim["person_id"],
+            "policyholder_nric":    person["nric"],
+            "policyholder_name":    person["full_name"],
+            "product_code":         tier["product_code"],
+            "product_family":       tier_name,
+            "coverage":             list(tier["covered_claim_types"]),
+            "sum_assured_sgd":      tier["annual_limit_sgd"],
+            "annual_limit_sgd":     tier["annual_limit_sgd"],
+            "annual_used_sgd":      0,
+            "max_ward_class":       tier["max_ward_class"],
+            "eligible_provider_tiers": list(tier["eligible_provider_tiers"]),
+            "covered_claim_types":  list(tier["covered_claim_types"]),
+            "waiting_periods_days": dict(tier["waiting_periods_days"]),
+            "inception_date":       claim["policy_inception_date"],
+            "next_premium_due":     "2026-11-30",
+            "annual_premium_sgd":   base_prem,
+            "status":               "IN_FORCE",
+            "riders":               list(tier["default_riders"]),
             "life_asia_source_ref": f"LA_POLADM.PLC_{pid}",
         }
-    # Overwrite the contestability-bridge policy with its authoritative record.
-    # CLM-53001 also references this policy_id, so we replace the auto-seeded
-    # generic row with the real GREAT Wealth Elite proposal that P-0007 bought
-    # 14 months ago.
-    p7 = PEOPLE["P-0007"]
-    registry["GESL-2025-0007007"] = {
-        "policy_id": "GESL-2025-0007007",
-        "person_id": "P-0007",
-        "policyholder_nric": p7["nric"],
-        "policyholder_name": p7["full_name"],
-        "product_code": "GE-WEALTH-ELITE-2024",
-        "product_family": "GREAT Wealth Elite",
-        "coverage": ["Life", "Critical Illness", "Total Permanent Disability"],
-        "sum_assured_sgd": 2000000,
-        "inception_date": "2025-07-11",
-        "next_premium_due": "2026-11-30",
-        "annual_premium_sgd": 18400,
-        "status": "IN_FORCE",
-        "riders": ["Premium Waiver", "Early Critical Illness Advance"],
-        "life_asia_source_ref": "LA_POLADM.PLC_GESL-2025-0007007",
-    }
     return registry
 
 
@@ -130,11 +215,12 @@ def _now() -> str:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="GE Integration Mocks",
+    title="Insurance Integration Mocks",
     description=(
-        "Mock services that stand in for the systems a Great Eastern claims or "
-        "underwriting workflow would touch. Not connected to any real GE, MOH, "
-        "LIA, or MAS system. Deterministic outputs seeded from static data."
+        "Mock services that stand in for the systems a Singapore IP (Integrated "
+        "Shield Plan) insurer's claims and underwriting workflows would touch. "
+        "Not connected to any real insurer, MOH, LIA, or MAS system. "
+        "Deterministic outputs seeded from static data."
     ),
     version="1.0.0",
     contact={"name": "Wand Customer Engineering"},
@@ -160,6 +246,7 @@ def health() -> Dict[str, Any]:
         "/lifeasia", "/great-app", "/medishield", "/myinfo",
         "/lia-medical", "/cbs", "/feat-audit", "/payout",
         "/document-check", "/medical-coding", "/fraud-pool",
+        "/coverage-check",
     ]}
 
 
@@ -170,17 +257,18 @@ def index() -> Dict[str, Any]:
         "docs": "/docs",
         "openapi": "/openapi.json",
         "services": {
-            "/lifeasia": "LifeAsia policy admin (policy lookup, proposal archive)",
-            "/great-app": "Customer app claim intake (FNOL submission + status)",
-            "/medishield": "MOH MediShield Life electronic feed",
-            "/myinfo": "Singpass MyInfo identity + income verification",
-            "/lia-medical": "LIA Guide to Medical Underwriting rating lookup",
-            "/cbs": "Credit Bureau Singapore financial underwriting pull",
-            "/feat-audit": "MAS FEAT audit trail sink",
-            "/payout": "GIRO / PayNow disbursement",
+            "/lifeasia":       "LifeAsia policy admin (policy lookup, proposal archive)",
+            "/great-app":      "Customer app claim intake (FNOL submission + status)",
+            "/medishield":     "MOH MediShield Life electronic feed",
+            "/myinfo":         "Singpass MyInfo identity + income verification",
+            "/lia-medical":    "LIA Guide to Medical Underwriting rating lookup",
+            "/cbs":            "Credit Bureau Singapore financial underwriting pull",
+            "/feat-audit":     "MAS FEAT audit trail sink",
+            "/payout":         "GIRO / PayNow disbursement",
             "/document-check": "Document completeness check per claim",
             "/medical-coding": "ICD-10 + procedure code validation",
-            "/fraud-pool": "Fraud scoring engine",
+            "/fraud-pool":     "Fraud scoring engine",
+            "/coverage-check": "IP tier · claim-type coverage · ward class · provider network · waiting period · annual limit",
         },
     }
 
@@ -253,7 +341,7 @@ def lifeasia_get_proposal_by_policy(policy_id: str) -> Dict[str, Any]:
     if not pol:
         raise HTTPException(404, f"policy_id {policy_id} not found")
 
-    if policy_id == "GESL-2025-0007007":
+    if policy_id == "IP-2025-0007007":
         person = PEOPLE["P-0007"]
         return {
             "policy_id": policy_id,
@@ -305,12 +393,12 @@ def lifeasia_get_proposal_by_policy(policy_id: str) -> Dict[str, Any]:
                 "Q8_diabetes_diagnosis": "No",
             },
         },
-        "channel": "Great Eastern App",
+        "channel": "Customer App",
     }
 
 
 # ===========================================================================
-# 2. GREAT EASTERN APP — claim intake
+# 2. CUSTOMER APP — claim intake
 # ===========================================================================
 GA = "/great-app"
 
@@ -322,7 +410,7 @@ class ClaimIntakePull(BaseModel):
 
 @app.get(f"{GA}", tags=["great-app"])
 def great_app_root() -> Dict[str, Any]:
-    return {"service": "Great Eastern App Claim Intake", "cases_available": len(CLAIMS_CASES)}
+    return {"service": "Customer App Claim Intake", "cases_available": len(CLAIMS_CASES)}
 
 
 @app.get(f"{GA}/inbox", tags=["great-app"])
@@ -332,7 +420,7 @@ def great_app_inbox(limit: int = Query(10, ge=1, le=100)) -> Dict[str, Any]:
     items = list(CLAIMS_CASES.values())[:limit]
     return {
         "pulled_at": _now(),
-        "channel": "Great Eastern App",
+        "channel": "Customer App",
         "count": len(items),
         "items": [
             {
@@ -894,6 +982,118 @@ def fraud_score(req: FraudScoreRequest) -> Dict[str, Any]:
         "watchlist_hits":           watchlist_hits,
         "similar_recent_claims":    0 if band == "LOW" else 2,
         "reject_reason":            None,
+    }
+
+
+# ===========================================================================
+# 12. COVERAGE CHECK — IP tier · claim-type · ward · provider · waiting period · limit
+# ===========================================================================
+COV = "/coverage-check"
+
+# Ward-class rank so we can compare "is A ward better than B1?" numerically
+_WARD_RANK = {"A": 4, "B1": 3, "B2": 2, "C": 1}
+
+
+@app.get(f"{COV}", tags=["coverage-check"])
+def cov_root() -> Dict[str, Any]:
+    return {
+        "service": "IP Coverage Check",
+        "note": "Verifies IP tier covers the claim type, ward class within tier limit, provider in tier network, past waiting period, and within annual limit.",
+    }
+
+
+@app.get(f"{COV}/{{claim_id}}", tags=["coverage-check"])
+def cov_check(claim_id: str) -> Dict[str, Any]:
+    """The single authoritative coverage verdict for one claim.
+    Consolidates: product tier compatibility, ward-class match, provider
+    network match, waiting-period status, and annual-limit remaining."""
+    case = CLAIMS_CASES.get(claim_id)
+    if not case:
+        raise HTTPException(404, f"claim_id {claim_id} not found")
+    pol = POLICY_REGISTRY.get(case.get("policy_id", ""))
+    if not pol:
+        raise HTTPException(404, f"policy for claim_id {claim_id} not found")
+
+    claim_type = case.get("claim_type", "")
+    ward_class = case.get("ward_class") or ""
+    provider_tier = case.get("provider_tier") or "Restructured"
+    insurer_liable = float(case.get("insurer_liable_sgd") or 0)
+
+    # Claim-type coverage
+    covered_types = pol.get("covered_claim_types") or []
+    product_covers_claim_type = claim_type in covered_types
+
+    # Ward-class match (only meaningful when a ward is recorded on the bill)
+    max_ward = pol.get("max_ward_class") or "A"
+    ward_ok = True
+    if ward_class:
+        if _WARD_RANK.get(ward_class, 0) > _WARD_RANK.get(max_ward, 4):
+            ward_ok = False
+
+    # Provider network
+    eligible = pol.get("eligible_provider_tiers") or ["Restructured", "Private"]
+    provider_in_network = provider_tier in eligible
+
+    # Waiting period
+    from datetime import datetime as _dt
+    inception = _dt.strptime(pol["inception_date"], "%Y-%m-%d").date()
+    los_date_str = case.get("admission_date") or case.get("visit_date") or "2026-09-01"
+    los_date = _dt.strptime(los_date_str[:10], "%Y-%m-%d").date()
+    days_since_inception = (los_date - inception).days
+    waiting_map = pol.get("waiting_periods_days") or {}
+    waiting_days = int(waiting_map.get(claim_type, 0))
+    past_waiting_period = days_since_inception >= waiting_days
+
+    # Annual limit remaining
+    annual_limit = float(pol.get("annual_limit_sgd") or 0)
+    annual_used = float(pol.get("annual_used_sgd") or 0)
+    within_limit = insurer_liable <= (annual_limit - annual_used)
+
+    # Aggregate verdict
+    reasons: List[str] = []
+    verdict = "COVERED"
+    if not product_covers_claim_type:
+        verdict = "NOT_COVERED_UNDER_PRODUCT"
+        reasons.append(f"Tier {pol['product_family']} does not cover {claim_type}. Covered types: {', '.join(covered_types)}.")
+    if not ward_ok:
+        verdict = "WARD_CLASS_EXCEEDS_TIER"
+        reasons.append(f"Bill lists ward {ward_class} but tier caps at {max_ward}.")
+    if not provider_in_network:
+        if verdict == "COVERED":
+            verdict = "PROVIDER_OUT_OF_NETWORK"
+        reasons.append(f"Provider tier '{provider_tier}' not eligible under tier {pol['product_family']}. Eligible: {', '.join(eligible)}.")
+    if not past_waiting_period:
+        if verdict == "COVERED":
+            verdict = "WITHIN_WAITING_PERIOD"
+        reasons.append(f"Loss on {los_date} · {days_since_inception} days since inception · waiting period {waiting_days} days.")
+    if not within_limit:
+        if verdict == "COVERED":
+            verdict = "EXCEEDS_ANNUAL_LIMIT"
+        reasons.append(f"Insurer liable SGD {insurer_liable} · annual remaining SGD {annual_limit - annual_used}.")
+
+    return {
+        "claim_id":                    claim_id,
+        "policy_id":                   pol["policy_id"],
+        "product_family":              pol["product_family"],
+        "product_code":                pol["product_code"],
+        "claim_type":                  claim_type,
+        "product_covers_claim_type":   product_covers_claim_type,
+        "ward_class":                  ward_class,
+        "max_ward_class_on_tier":      max_ward,
+        "ward_class_ok":               ward_ok,
+        "provider_tier":               provider_tier,
+        "eligible_provider_tiers":     eligible,
+        "provider_in_network":         provider_in_network,
+        "days_since_inception":        days_since_inception,
+        "waiting_period_days":         waiting_days,
+        "past_waiting_period":         past_waiting_period,
+        "annual_limit_sgd":            annual_limit,
+        "annual_used_sgd":             annual_used,
+        "insurer_liable_sgd":          insurer_liable,
+        "within_annual_limit":         within_limit,
+        "coverage_verdict":            verdict,
+        "reasons":                     reasons,
+        "reject_reason":               None if verdict == "COVERED" else "; ".join(reasons),
     }
 
 

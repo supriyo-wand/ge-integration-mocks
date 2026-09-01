@@ -1,18 +1,19 @@
 {
-  "_note": "10 First Notice of Loss claims submitted via Great Eastern App in Sep 2026. Each references a person_id and an in-force policy. Field 'ground_truth' is what the mock knows about the case (used by mock endpoints to return realistic downstream data). The workflow does not see ground_truth directly — it reads bills, provider data, LifeAsia lookups, and derives the same conclusion.",
+  "_note": "10 IP-shaped FNOL claims submitted via the customer app in Sep 2026. Each references a person_id in people.json and an in-force IP policy. Field 'ground_truth' is what the mock knows about the case (used by mock endpoints to shape realistic downstream data). The workflow does not see ground_truth directly — it reads bills, provider data, LifeAsia policy lookups, coverage checks, medical coding, MediShield adjudication, and derives the same conclusion.",
   "cases": [
     {
       "claim_id": "CLM-53001",
       "person_id": "P-0007",
-      "policy_id": "GESL-2025-0007007",
+      "policy_id": "IP-2025-0007007",
       "policy_inception_date": "2025-07-11",
       "submitted_at": "2026-09-01T08:41:22+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Hospitalisation",
       "diagnosis_primary": "ST-Elevation Myocardial Infarction (STEMI)",
       "icd10_primary": "I21.0",
       "provider_code": "RGH",
       "provider_name": "Raffles Hospital",
+      "provider_tier": "Private",
       "admission_date": "2026-08-28",
       "discharge_date": "2026-08-31",
       "ward_class": "B1",
@@ -45,15 +46,16 @@
     {
       "claim_id": "CLM-53002",
       "person_id": "P-0001",
-      "policy_id": "GESL-2022-0001001",
+      "policy_id": "IP-2022-0001001",
       "policy_inception_date": "2022-03-15",
       "submitted_at": "2026-09-01T09:12:47+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Outpatient Specialist",
       "diagnosis_primary": "Cervical spondylosis with radiculopathy",
       "icd10_primary": "M50.10",
       "provider_code": "NUH",
       "provider_name": "National University Hospital",
+      "provider_tier": "Restructured",
       "visit_date": "2026-08-29",
       "total_bill_sgd": 385.00,
       "medishield_covered_sgd": 0.00,
@@ -63,22 +65,23 @@
       "ground_truth": {
         "contestability_trigger": false,
         "policy_age_months": 53.6,
-        "expected_outcome": "AUTO_APPROVE",
-        "expected_action": "Straight-through approval. Amount below fast-track threshold. Payout to GIRO."
+        "expected_outcome": "AUTO_DECLINE",
+        "expected_action": "Policyholder holds BasicShield tier which does not include outpatient specialist coverage. Explain via customer channel and suggest upgrading to Wellness+ Rider."
       }
     },
     {
       "claim_id": "CLM-53003",
       "person_id": "P-0002",
-      "policy_id": "GESL-2020-0002002",
+      "policy_id": "IP-2020-0002002",
       "policy_inception_date": "2020-08-04",
       "submitted_at": "2026-09-01T10:24:03+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Maternity",
       "diagnosis_primary": "Antenatal care - 34 weeks gestation",
       "icd10_primary": "Z34.03",
       "provider_code": "TMC",
       "provider_name": "Thomson Medical Centre",
+      "provider_tier": "Private",
       "visit_date": "2026-08-27",
       "total_bill_sgd": 512.00,
       "medishield_covered_sgd": 0.00,
@@ -89,21 +92,22 @@
         "contestability_trigger": false,
         "policy_age_months": 73.0,
         "expected_outcome": "AUTO_APPROVE",
-        "expected_action": "Maternity rider valid, benefit within schedule."
+        "expected_action": "Maternity rider on RestructuredCare A tier valid, benefit within schedule."
       }
     },
     {
       "claim_id": "CLM-53004",
       "person_id": "P-0003",
-      "policy_id": "GESL-2019-0003003",
+      "policy_id": "IP-2019-0003003",
       "policy_inception_date": "2019-11-20",
       "submitted_at": "2026-09-01T11:37:19+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Personal Accident",
       "diagnosis_primary": "Lacerated right hand, tendon injury",
       "icd10_primary": "S66.902A",
       "provider_code": "SGH",
       "provider_name": "Singapore General Hospital",
+      "provider_tier": "Restructured",
       "admission_date": "2026-08-24",
       "discharge_date": "2026-08-25",
       "ward_class": "C",
@@ -111,26 +115,27 @@
       "medishield_covered_sgd": 2100.00,
       "insurer_liable_sgd": 2720.00,
       "procedures": ["Wound debridement", "Tendon repair", "Splint"],
-      "attached_documents": ["Discharge_Summary.pdf", "Bill.pdf", "Incident_Report_Keppel.pdf"],
+      "attached_documents": ["Discharge_Summary.pdf", "Bill.pdf", "Employer_Incident_Report.pdf"],
       "ground_truth": {
         "contestability_trigger": false,
         "policy_age_months": 81.4,
         "expected_outcome": "APPROVE_WITH_VERIFICATION",
-        "expected_action": "Verify incident report from employer. PA rider valid, occupational hazard covered. Approve after verification."
+        "expected_action": "Verify incident report from employer. Personal accident rider valid on RestructuredCare B, occupational hazard covered. Approve after verification."
       }
     },
     {
       "claim_id": "CLM-53005",
       "person_id": "P-0004",
-      "policy_id": "GESL-2023-0004004",
+      "policy_id": "IP-2023-0004004",
       "policy_inception_date": "2023-05-08",
       "submitted_at": "2026-09-01T12:58:41+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Day Surgery",
       "diagnosis_primary": "Refractive error (myopia -3.75 both eyes)",
       "icd10_primary": "H52.13",
       "provider_code": "MEH",
       "provider_name": "Mount Elizabeth Novena Hospital",
+      "provider_tier": "Private",
       "visit_date": "2026-08-26",
       "total_bill_sgd": 5800.00,
       "medishield_covered_sgd": 0.00,
@@ -140,22 +145,23 @@
       "ground_truth": {
         "contestability_trigger": false,
         "policy_age_months": 40.0,
-        "expected_outcome": "DECLINE",
-        "expected_action": "Elective cosmetic/refractive procedure not covered under IP plan exclusion 4.2. Generate customer letter."
+        "expected_outcome": "AUTO_DECLINE",
+        "expected_action": "Elective cosmetic/refractive procedure not covered under IP schedule exclusion 4.2. Generate customer letter."
       }
     },
     {
       "claim_id": "CLM-53006",
       "person_id": "P-0005",
-      "policy_id": "GESL-2018-0005005",
+      "policy_id": "IP-2018-0005005",
       "policy_inception_date": "2018-02-11",
       "submitted_at": "2026-09-01T14:11:29+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Hospitalisation",
       "diagnosis_primary": "Diabetic Ketoacidosis",
       "icd10_primary": "E10.10",
       "provider_code": "TTS",
       "provider_name": "Tan Tock Seng Hospital",
+      "provider_tier": "Restructured",
       "admission_date": "2026-08-22",
       "discharge_date": "2026-08-26",
       "ward_class": "B2",
@@ -167,22 +173,23 @@
       "ground_truth": {
         "contestability_trigger": false,
         "policy_age_months": 102.7,
-        "expected_outcome": "APPROVE_WITH_SUBLIMIT",
-        "expected_action": "Pre-existing DM declared at policy inception, riders honored. Sub-limit apply on non-critical component. Approve subject to schedule."
+        "expected_outcome": "REQUIRES_SIU_REVIEW",
+        "expected_action": "Pre-existing DM declared at policy inception. Fraud engine flags cross-claim pattern for the RestructuredCare B tier. Route to SIU officer for final call."
       }
     },
     {
       "claim_id": "CLM-53007",
       "person_id": "P-0006",
-      "policy_id": "GESL-2024-0006006",
+      "policy_id": "IP-2024-0006006",
       "policy_inception_date": "2024-06-19",
       "submitted_at": "2026-09-01T15:44:52+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Hospitalisation",
       "diagnosis_primary": "Full-thickness thermal burn right forearm (12% TBSA)",
       "icd10_primary": "T22.311A",
       "provider_code": "SGH",
       "provider_name": "Singapore General Hospital Burns Centre",
+      "provider_tier": "Restructured",
       "admission_date": "2026-08-19",
       "discharge_date": "2026-08-25",
       "ward_class": "B1",
@@ -195,13 +202,13 @@
         "contestability_trigger": false,
         "policy_age_months": 26.5,
         "expected_outcome": "APPROVE_FAST_TRACK",
-        "expected_action": "Occupational injury reported to MOM. Rider explicit for kitchen burns per declared occupation. Fast track approve."
+        "expected_action": "Occupational injury reported to MOM. RestructuredCare A rider explicit for kitchen burns per declared occupation. Fast-track approve."
       }
     },
     {
       "claim_id": "CLM-53008",
       "person_id": "P-0008",
-      "policy_id": "GESL-2021-0008008",
+      "policy_id": "IP-2021-0008008",
       "policy_inception_date": "2021-09-04",
       "submitted_at": "2026-09-01T16:31:04+08:00",
       "channel": "Financial Representative",
@@ -210,6 +217,7 @@
       "icd10_primary": "K35.80",
       "provider_code": "KKH",
       "provider_name": "KK Women's and Children's Hospital",
+      "provider_tier": "Restructured",
       "admission_date": "2026-08-30",
       "discharge_date": "2026-09-01",
       "ward_class": "B1",
@@ -222,21 +230,22 @@
         "contestability_trigger": false,
         "policy_age_months": 60.0,
         "expected_outcome": "AUTO_APPROVE",
-        "expected_action": "Routine acute condition, no pre-existing overlap, straight-through approve."
+        "expected_action": "Routine acute condition covered under RestructuredCare A tier. Straight-through approve."
       }
     },
     {
       "claim_id": "CLM-53009",
       "person_id": "P-0009",
-      "policy_id": "GESL-2024-0009009",
+      "policy_id": "IP-2024-0009009",
       "policy_inception_date": "2024-12-17",
       "submitted_at": "2026-09-01T17:22:38+08:00",
-      "channel": "Great Eastern App",
+      "channel": "Customer App",
       "claim_type": "Personal Accident",
       "diagnosis_primary": "Left tibial plateau fracture",
       "icd10_primary": "S82.109A",
       "provider_code": "NUH",
       "provider_name": "National University Hospital",
+      "provider_tier": "Restructured",
       "admission_date": "2026-08-23",
       "discharge_date": "2026-08-27",
       "ward_class": "B1",
@@ -250,13 +259,13 @@
         "policy_age_months": 8.5,
         "policy_age_note": "Within contestability window but no material non-disclosure evidence found. Contestability review must clear.",
         "expected_outcome": "APPROVE_AFTER_CONTESTABILITY_CLEAR",
-        "expected_action": "Contestability check on hazardous activity declaration. Motorbike ownership disclosed on proposal Q11 - checks out. Require police accident report. Approve on documentation complete."
+        "expected_action": "Contestability check on hazardous-activity declaration. Motorbike ownership disclosed on proposal Q11 - checks out. Require police accident report. Approve on documentation complete."
       }
     },
     {
       "claim_id": "CLM-53010",
       "person_id": "P-0010",
-      "policy_id": "GESL-2020-0010010",
+      "policy_id": "IP-2020-0010010",
       "policy_inception_date": "2020-10-28",
       "submitted_at": "2026-09-01T18:47:11+08:00",
       "channel": "Financial Representative",
@@ -265,6 +274,7 @@
       "icd10_primary": "S83.211A",
       "provider_code": "GHC",
       "provider_name": "Gleneagles Hospital",
+      "provider_tier": "Private",
       "admission_date": "2026-09-01",
       "discharge_date": "planned 2026-09-02",
       "ward_class": "A",
@@ -277,7 +287,7 @@
         "contestability_trigger": false,
         "policy_age_months": 70.4,
         "expected_outcome": "PENDING_PREAUTHORIZATION",
-        "expected_action": "Elective procedure needs pre-auth review. Amount above straight-through threshold. Route to human adjuster."
+        "expected_action": "Elective procedure at private hospital needs pre-authorisation. Amount above straight-through threshold. Route to human adjuster."
       }
     }
   ]
