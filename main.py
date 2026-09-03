@@ -1352,6 +1352,15 @@ class BindPolicyRequest(BaseModel):
     table_rating:                Optional[str] = None
     riders:                      List[str] = []
     effective_date:              Optional[str] = None
+    # Reinsurance attachment · captured at bind so future Claims can see
+    # the ceded portion and bill the reinsurer accordingly.
+    cede_required:                Optional[bool] = False
+    reinsurance_quote_id:         Optional[str] = None
+    reinsurer:                    Optional[str] = None
+    retention_kept_sgd:           Optional[float] = None
+    ceded_sum_assured_sgd:        Optional[float] = 0
+    ceded_pct:                    Optional[float] = 0
+    ceded_annual_premium_sgd:     Optional[float] = 0
 
 
 @app.post(f"{LA}/bind-policy", tags=["lifeasia"])
@@ -1389,6 +1398,14 @@ def lifeasia_bind_policy(req: BindPolicyRequest) -> Dict[str, Any]:
             "life_asia_source_ref": f"LA_POLADM.PLC_{policy_id}",
             "sourced_from_app":     req.application_id,
             "bound_at":             _now(),
+            # Reinsurance attachment · used by Claims for ceded-share billing
+            "cede_required":            bool(req.cede_required),
+            "reinsurance_quote_id":     req.reinsurance_quote_id,
+            "reinsurer":                req.reinsurer,
+            "retention_kept_sgd":       req.retention_kept_sgd,
+            "ceded_sum_assured_sgd":    req.ceded_sum_assured_sgd or 0,
+            "ceded_pct":                req.ceded_pct or 0,
+            "ceded_annual_premium_sgd": req.ceded_annual_premium_sgd or 0,
         }
         BOUND_POLICIES[policy_id] = record
         POLICY_REGISTRY[policy_id] = record  # so subsequent GETs find it
