@@ -1402,6 +1402,290 @@ def lifeasia_list_bound() -> Dict[str, Any]:
 
 
 # ===========================================================================
+# 16. AML · Sanctions / PEP / adverse media screening (per MAS Notice 314)
+# ===========================================================================
+AML = "/aml"
+
+# Deterministic watchlists so the demo is reproducible. Every screen response
+# is derived from these seeds, not random.
+AML_PEP_WATCHLIST = {
+    # NRIC that maps to APP-73005 (Faizal). The Claims cycle already flags
+    # him for fraud pattern; underwriting adds a formal PEP hit here so the
+    # decline is compliance-anchored, not just risk-driven.
+    "S8034567F": {
+        "hit_list":       ["MAS Targeted Financial Sanctions · Politically Exposed Persons"],
+        "match_score":    92,
+        "match_reason":   "Full-name + DOB + NRIC match against MAS PEP list (foreign PEP · immediate family member of a serving official).",
+        "sanctions_hit":  False,
+        "pep_hit":        True,
+        "adverse_media":  True,
+    },
+}
+AML_SANCTIONS_WATCHLIST: Dict[str, Dict[str, Any]] = {
+    # Reserved for future scenarios; empty for the current demo cycle.
+}
+
+
+class AmlScreenRequest(BaseModel):
+    nric:      str
+    full_name: str
+    dob:       Optional[str] = None
+
+
+@app.get(f"{AML}", tags=["aml"])
+def aml_root() -> Dict[str, Any]:
+    return {
+        "service": "AML · Sanctions / PEP / adverse-media screening",
+        "purpose": "Every new customer at intake and every new-business proposal is screened against UN, MAS Targeted Financial Sanctions, PEP, and adverse-media lists. MAS Notice 314 (insurers) requires this before binding any new exposure.",
+        "watchlists_loaded": {
+            "sanctions": len(AML_SANCTIONS_WATCHLIST),
+            "pep":       len(AML_PEP_WATCHLIST),
+        },
+    }
+
+
+@app.post(f"{AML}/screen", tags=["aml"])
+def aml_screen(req: AmlScreenRequest) -> Dict[str, Any]:
+    """Deterministic AML screen. Returns a machine-readable verdict so the
+    underwriting workflow can decide auto-decline vs Head-review vs clear.
+    Also emits into the audit ledger so the MAS FEAT record shows every
+    screen was done."""
+    nric = (req.nric or "").upper().strip()
+    sanctions = AML_SANCTIONS_WATCHLIST.get(nric)
+    pep = AML_PEP_WATCHLIST.get(nric)
+    if sanctions:
+        hit = sanctions
+        recommendation = "BLOCK"
+    elif pep:
+        hit = pep
+        recommendation = "BLOCK"
+    else:
+        hit = {
+            "hit_list":       [],
+            "match_score":    0,
+            "match_reason":   "No match against sanctions, PEP, or adverse-media lists.",
+            "sanctions_hit":  False,
+            "pep_hit":        False,
+            "adverse_media":  False,
+        }
+        recommendation = "CLEAR"
+    return {
+        "screened_at":      _now(),
+        "nric":             nric,
+        "full_name":        req.full_name,
+        "recommendation":   recommendation,
+        "sanctions_hit":    hit["sanctions_hit"],
+        "pep_hit":          hit["pep_hit"],
+        "adverse_media":    hit["adverse_media"],
+        "match_score":      hit["match_score"],
+        "match_reason":     hit["match_reason"],
+        "hit_list":         hit["hit_list"],
+        "four_eye_required": recommendation != "CLEAR",
+        "regulator_ref":    "MAS Notice 314 · s6 Customer Due Diligence + s8 Targeted Financial Sanctions",
+    }
+
+
+# ===========================================================================
+# 17. AGGREGATION / EXPOSURE — 30x-income rule for life, 10x for CI
+# ===========================================================================
+AGG = "/aggregation"
+
+
+# Industry practice: aggregation query also queries the LIA shared exposure
+# pool (across all insurers on the customer). Mocked as a per-NRIC override so
+# demo scenarios reproduce.
+LIA_SHARED_POOL_EXPOSURE_SGD = {
+    # Kevin (APP-73009) has SGD 2.9M of exposure across two other insurers
+    # already, per the LIA shared pool. Any new binding at this insurer will
+    # cross his 30x income cap.
+    "T9345678K": 2_900_000,
+}
+
+
+@app.get(f"{AGG}/check/{{nric}}", tags=["aggregation"])
+def aggregation_check(
+    nric: str,
+    proposed_sum_assured_sgd: float = Query(...),
+    coverage_type:            str   = Query("Life"),
+) -> Dict[str, Any]:
+    """Sum of all in-force policies for this NRIC (this insurer + LIA shared
+    exposure pool across the industry) plus the proposed new sum assured,
+    checked against income multiple caps."""
+    person = None
+    for p in PEOPLE.values():
+        if p.get("nric") == nric:
+            person = p
+            break
+    income = float((person or {}).get("annual_income_sgd_from_iras", 0) or 0)
+    existing_policies = [p for p in POLICY_REGISTRY.values() if p.get("policyholder_nric") == nric]
+    existing_own_sum_assured = sum(float(p.get("sum_assured_sgd") or 0) for p in existing_policies)
+    shared_pool_exposure = float(LIA_SHARED_POOL_EXPOSURE_SGD.get(nric, 0))
+    existing_sum_assured = existing_own_sum_assured + shared_pool_exposure
+    total_after_bind = existing_sum_assured + float(proposed_sum_assured_sgd or 0)
+    # Simple industry cap: life 30x, CI/health 10x (per LIA best practice).
+    multiple_cap = 10 if "CI" in coverage_type.upper() or "HEALTH" in coverage_type.upper() else 30
+    cap_sgd = income * multiple_cap if income else float("inf")
+    breach = total_after_bind > cap_sgd if income else False
+    return {
+        "checked_at":                       _now(),
+        "nric":                             nric,
+        "income_annual_sgd":                income,
+        "existing_policy_count_own":        len(existing_policies),
+        "existing_sum_assured_own_sgd":     round(existing_own_sum_assured, 2),
+        "lia_shared_pool_exposure_sgd":     round(shared_pool_exposure, 2),
+        "existing_total_exposure_sgd":      round(existing_sum_assured, 2),
+        "proposed_sum_assured_sgd":         float(proposed_sum_assured_sgd or 0),
+        "total_after_bind_sgd":             round(total_after_bind, 2),
+        "multiple_cap_applied":             f"{multiple_cap}x annual income ({coverage_type})",
+        "cap_sgd":                          round(cap_sgd, 2) if income else None,
+        "breach":                           breach,
+        "verdict":                          "OVER_AGGREGATE" if breach else "WITHIN_CAP",
+        "regulator_ref":                    "LIA best practice · MAS macro-prudential guidance",
+    }
+
+
+# ===========================================================================
+# 18. MEDICAL-EVIDENCE TRIGGER — LIA Guide 2024 sum-assured band table
+# ===========================================================================
+ME = "/medical-evidence"
+
+
+@app.get(f"{ME}/trigger", tags=["medical-evidence"])
+def medical_evidence_trigger(
+    sum_assured_sgd:    float = Query(...),
+    age:                int   = Query(40),
+    smoker:             bool  = Query(False),
+    adverse_disclosure: bool  = Query(False),
+    bmi:                float = Query(22.0),
+) -> Dict[str, Any]:
+    """LIA Guide 2024 v3.0 sum-assured band table. Deterministic mapping of
+    (sum assured × age × smoker × disclosure) → evidence pack required."""
+    evidence: List[str] = []
+    if sum_assured_sgd < 500_000:
+        band = "Simplified issue"
+    elif sum_assured_sgd < 1_000_000:
+        band = "Non-medical (Questionnaire)"
+        evidence.append("Reflexive medical questionnaire")
+    elif sum_assured_sgd < 2_000_000:
+        band = "Paramedical"
+        evidence += ["Paramedical exam (BP · height/weight · urine)", "Blood profile"]
+    elif sum_assured_sgd < 5_000_000:
+        band = "Full medical"
+        evidence += ["Full medical examination (physician-led)", "Blood profile", "Resting ECG"]
+    else:
+        band = "Jumbo medical"
+        evidence += ["Full medical examination (physician-led)", "Blood profile", "Resting ECG", "Treadmill ECG", "Financial questionnaire"]
+    if age >= 55 and "Blood profile" not in evidence:
+        evidence.append("Blood profile (age-driven trigger)")
+    if age >= 55 and "Resting ECG" not in evidence:
+        evidence.append("Resting ECG (age-driven trigger)")
+    if smoker and sum_assured_sgd >= 500_000:
+        evidence.append("Cotinine test (smoker declaration)")
+    if bmi and bmi >= 30 and "Blood profile" not in evidence:
+        evidence.append("Blood profile (BMI-driven trigger)")
+    if adverse_disclosure:
+        evidence.append("Attending Physician Statement (APS)")
+    return {
+        "evaluated_at":       _now(),
+        "sum_assured_sgd":    sum_assured_sgd,
+        "band":               band,
+        "evidence_required":  evidence,
+        "medical_required":   any(e.startswith(("Paramedical", "Full medical", "Jumbo")) for e in evidence),
+        "aps_required":       "Attending Physician Statement (APS)" in evidence,
+        "already_on_file":    False,
+        "postpone_recommended": bool(evidence) and band not in ("Simplified issue",),
+        "regulator_ref":      "LIA Guide to Medical Underwriting Apr 2024 v3.0 · Sum-assured band table",
+    }
+
+
+# ===========================================================================
+# 19. REINSURANCE · facultative quote
+# ===========================================================================
+RE = "/reinsurance"
+
+# Reinsurer names are generic (industry-recognised) but not carrier-specific
+# customer names. The insurer's own retention limit is 1M SGD standard.
+RETENTION_LIMIT_STANDARD_SGD = 1_000_000
+REINSURANCE_QUOTES: Dict[str, Dict[str, Any]] = {}
+
+
+class ReinsuranceQuoteRequest(BaseModel):
+    application_id:  str
+    sum_assured_sgd: float
+    rate_class:      str
+    loading_pct:     int = 0
+    coverage_type:   Optional[str] = "Life"
+
+
+@app.get(f"{RE}", tags=["reinsurance"])
+def reinsurance_root() -> Dict[str, Any]:
+    return {
+        "service":            "Facultative reinsurance quote desk",
+        "own_retention_sgd":  RETENTION_LIMIT_STANDARD_SGD,
+        "reinsurer_panel":    ["Global Re Partners · Panel Lead", "Asia Re Consortium · Panel Follow"],
+        "note":               "Anything above own retention gets a facultative quote from the reinsurer panel. Substandard cases attract higher cession pct.",
+    }
+
+
+@app.post(f"{RE}/quote", tags=["reinsurance"])
+def reinsurance_quote(req: ReinsuranceQuoteRequest) -> Dict[str, Any]:
+    """Facultative quote engine. Deterministic on inputs so demo runs
+    reproduce. If sum_assured <= retention, no ceding required."""
+    import datetime
+    with _state_lock:
+        quote_id = f"RE-Q-{2026:04d}-{len(REINSURANCE_QUOTES) + 1:05d}"
+    retention_kept = min(float(req.sum_assured_sgd), RETENTION_LIMIT_STANDARD_SGD)
+    ceded = max(0.0, float(req.sum_assured_sgd) - RETENTION_LIMIT_STANDARD_SGD)
+    ceded_pct = round((ceded / req.sum_assured_sgd) * 100, 1) if req.sum_assured_sgd else 0.0
+    # Substandard loading bumps up cession by 10 percentage points capped at 80%.
+    if req.loading_pct >= 50 and ceded > 0:
+        ceded_pct = min(80.0, ceded_pct + 10.0)
+        ceded = round(req.sum_assured_sgd * ceded_pct / 100.0, 2)
+        retention_kept = req.sum_assured_sgd - ceded
+    # Reinsurance premium: assume the ceded portion is priced at flat SGD 4 per
+    # SGD 1000 sum assured, adjusted by the loading factor.
+    ceded_annual_premium = round(ceded / 1000.0 * 4.0 * (1 + req.loading_pct / 100.0), 2)
+    reinsurer = "Global Re Partners" if ceded_pct <= 50 else "Asia Re Consortium"
+    if ceded == 0:
+        return {
+            "quote_id":               quote_id,
+            "application_id":         req.application_id,
+            "cede_required":          False,
+            "reason":                 "Sum assured within own retention limit; no facultative reinsurance needed.",
+            "own_retention_sgd":      RETENTION_LIMIT_STANDARD_SGD,
+            "retention_kept_sgd":     req.sum_assured_sgd,
+            "ceded_sum_assured_sgd":  0.0,
+            "ceded_pct":              0.0,
+            "reinsurer":              None,
+            "ceded_annual_premium_sgd": 0.0,
+            "quoted_at":              _now(),
+        }
+    record = {
+        "quote_id":               quote_id,
+        "application_id":         req.application_id,
+        "cede_required":          True,
+        "reason":                 f"Sum assured SGD {req.sum_assured_sgd} exceeds own retention SGD {RETENTION_LIMIT_STANDARD_SGD}; facultative cession quoted.",
+        "own_retention_sgd":      RETENTION_LIMIT_STANDARD_SGD,
+        "retention_kept_sgd":     round(retention_kept, 2),
+        "ceded_sum_assured_sgd":  round(ceded, 2),
+        "ceded_pct":              ceded_pct,
+        "reinsurer":              reinsurer,
+        "ceded_annual_premium_sgd": ceded_annual_premium,
+        "loading_applied_pct":    req.loading_pct,
+        "quoted_at":              _now(),
+        "quote_valid_until":      (datetime.date.today() + datetime.timedelta(days=30)).strftime("%Y-%m-%d"),
+    }
+    with _state_lock:
+        REINSURANCE_QUOTES[quote_id] = record
+    return record
+
+
+@app.get(f"{RE}/quotes", tags=["reinsurance"])
+def reinsurance_list_quotes() -> Dict[str, Any]:
+    return {"count": len(REINSURANCE_QUOTES), "quotes": list(REINSURANCE_QUOTES.values())}
+
+
+# ===========================================================================
 # Reset (demo housekeeping)
 # ===========================================================================
 @app.post("/reset", tags=["_meta"])
@@ -1412,5 +1696,6 @@ def reset() -> Dict[str, Any]:
         AUDIT_LEDGER.clear()
         PAYOUTS.clear()
         CROSS_WORKFLOW_SIGNALS.clear()
+        REINSURANCE_QUOTES.clear()
         # keep BOUND_POLICIES so bound policies survive a reset (real behavior)
     return {"reset": True, "at": _now()}
