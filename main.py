@@ -403,10 +403,60 @@ def lifeasia_get_proposal_by_policy(policy_id: str) -> Dict[str, Any]:
 # ===========================================================================
 GA = "/great-app"
 
+# Industry-standard field discriminators every mature core-claims platform
+# carries (Guidewire ClaimCenter, FINEOS AdminSuite, Pega Insurance).
+# We compute them at response time so the mock stays declarative.
+_CLAIM_TYPE_TO_LOB = {
+    "Hospitalisation":       "Health · IP · Hospitalisation",
+    "Outpatient Specialist": "Health · IP · Outpatient Specialist",
+    "Day Surgery":           "Health · IP · Day Surgery",
+    "Personal Accident":     "Health · IP · Personal Accident",
+    "Maternity":             "Health · IP · Maternity",
+    "Elective Surgery":      "Health · IP · Elective Surgery",
+}
+_CLAIM_TYPE_TO_SHORT = {
+    "Hospitalisation":       "HOSP",
+    "Outpatient Specialist": "OPS",
+    "Day Surgery":           "DS",
+    "Personal Accident":     "PA",
+    "Maternity":             "MAT",
+    "Elective Surgery":      "ES",
+}
 
-class ClaimIntakePull(BaseModel):
-    channel: Optional[str] = None
-    include_docs: bool = True
+
+def _enrich_intake_fields(case: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the industry-standard intake fields for a claim record.
+
+    - line_of_business : Pega-style case-type discriminator
+    - exposure_code    : Guidewire-style Exposure id (claimant · coverage · sequence)
+    - date_of_loss     : the actual medical event date (admission or visit)
+    - fnol_reported_at : when the customer first notified the insurer (a beat
+                         before formal submission on average).
+    - reported_channel : notification channel (kept in sync with `channel`)
+    """
+    import datetime
+    ct = case.get("claim_type", "")
+    lob   = _CLAIM_TYPE_TO_LOB.get(ct, "Health · IP · " + ct)
+    short = _CLAIM_TYPE_TO_SHORT.get(ct, "UNK")
+    ward  = case.get("ward_class") or "OP"
+    cid_num = (case.get("claim_id", "") or "").replace("CLM-", "")
+    exposure_code = f"EXP-{cid_num}-{short}-{ward}"
+    date_of_loss = case.get("admission_date") or case.get("visit_date") or (case.get("submitted_at") or "")[:10]
+    # FNOL notified ~2 hours before formal submission (customer app trace).
+    submitted = case.get("submitted_at") or ""
+    fnol_reported_at = submitted
+    try:
+        dt = datetime.datetime.fromisoformat(submitted)
+        fnol_reported_at = (dt - datetime.timedelta(hours=2)).isoformat()
+    except Exception:
+        pass
+    return {
+        "line_of_business": lob,
+        "exposure_code":    exposure_code,
+        "date_of_loss":     (date_of_loss[:10] if isinstance(date_of_loss, str) else date_of_loss),
+        "fnol_reported_at": fnol_reported_at,
+        "reported_channel": case.get("channel", "Customer App"),
+    }
 
 
 @app.get(f"{GA}", tags=["great-app"])
@@ -417,26 +467,38 @@ def great_app_root() -> Dict[str, Any]:
 @app.get(f"{GA}/inbox", tags=["great-app"])
 def great_app_inbox(limit: int = Query(10, ge=1, le=100)) -> Dict[str, Any]:
     """Return the FNOL inbox as if just pulled from the App. Every case has
-    a submitted_at set in Sep 2026. Order preserved."""
+    a submitted_at set in Sep 2026. Order preserved.
+
+    Every item carries the industry-standard intake fields:
+    line_of_business, exposure_code, date_of_loss, fnol_reported_at,
+    reported_channel — the shape a Guidewire ClaimCenter / FINEOS /
+    Pega FNOL feed would produce.
+    """
     items = list(CLAIMS_CASES.values())[:limit]
+    out_items = []
+    for c in items:
+        e = _enrich_intake_fields(c)
+        out_items.append({
+            "claim_id":               c["claim_id"],
+            "person_id":              c["person_id"],
+            "policy_id":              c["policy_id"],
+            "claim_type":             c["claim_type"],
+            "line_of_business":       e["line_of_business"],
+            "exposure_code":          e["exposure_code"],
+            "diagnosis_primary":      c["diagnosis_primary"],
+            "date_of_loss":           e["date_of_loss"],
+            "fnol_reported_at":       e["fnol_reported_at"],
+            "submitted_at":           c["submitted_at"],
+            "reported_channel":       e["reported_channel"],
+            "total_bill_sgd":         c["total_bill_sgd"],
+            "medishield_covered_sgd": c["medishield_covered_sgd"],
+            "insurer_liable_sgd":     c["insurer_liable_sgd"],
+        })
     return {
         "pulled_at": _now(),
-        "channel": "Customer App",
-        "count": len(items),
-        "items": [
-            {
-                "claim_id": c["claim_id"],
-                "person_id": c["person_id"],
-                "policy_id": c["policy_id"],
-                "claim_type": c["claim_type"],
-                "diagnosis_primary": c["diagnosis_primary"],
-                "submitted_at": c["submitted_at"],
-                "total_bill_sgd": c["total_bill_sgd"],
-                "medishield_covered_sgd": c["medishield_covered_sgd"],
-                "insurer_liable_sgd": c["insurer_liable_sgd"],
-            }
-            for c in items
-        ],
+        "channel":   "Customer App",
+        "count":     len(items),
+        "items":     out_items,
     }
 
 
@@ -450,6 +512,7 @@ def great_app_get_claim(claim_id: str) -> Dict[str, Any]:
     public = {k: v for k, v in case.items() if k != "ground_truth"}
     return {
         **public,
+        **_enrich_intake_fields(case),
         "policyholder_name": person.get("full_name"),
         "policyholder_nric": person.get("nric"),
     }
