@@ -1539,10 +1539,29 @@ def aggregation_check(
     shared_pool_exposure = float(LIA_SHARED_POOL_EXPOSURE_SGD.get(nric, 0))
     existing_sum_assured = existing_own_sum_assured + shared_pool_exposure
     total_after_bind = existing_sum_assured + float(proposed_sum_assured_sgd or 0)
-    # Simple industry cap: life 30x, CI/health 10x (per LIA best practice).
-    multiple_cap = 10 if "CI" in coverage_type.upper() or "HEALTH" in coverage_type.upper() else 30
-    cap_sgd = income * multiple_cap if income else float("inf")
-    breach = total_after_bind > cap_sgd if income else False
+    # Industry-standard caps per LIA best practice:
+    #   Integrated Shield Plan / hospitalisation: no income cap (medical necessity-based)
+    #   Life / Life+CI / Life+TPD: 30x annual income
+    #   CI-only (no Life): 15x annual income
+    cov = (coverage_type or "").upper()
+    is_ip = ("INTEGRATED SHIELD" in cov) or ("HOSPITALISATION" in cov) or cov.startswith("IP")
+    contains_life = "LIFE" in cov
+    if is_ip:
+        multiple_cap = None
+    elif contains_life:
+        multiple_cap = 30
+    elif "CI" in cov:
+        multiple_cap = 15
+    else:
+        multiple_cap = 30
+    if multiple_cap is None:
+        cap_sgd = None
+        cap_display = f"none applied ({coverage_type})"
+        breach = False
+    else:
+        cap_sgd = income * multiple_cap if income else float("inf")
+        cap_display = f"{multiple_cap}x annual income ({coverage_type})"
+        breach = total_after_bind > cap_sgd if income else False
     return {
         "checked_at":                       _now(),
         "nric":                             nric,
@@ -1553,8 +1572,8 @@ def aggregation_check(
         "existing_total_exposure_sgd":      round(existing_sum_assured, 2),
         "proposed_sum_assured_sgd":         float(proposed_sum_assured_sgd or 0),
         "total_after_bind_sgd":             round(total_after_bind, 2),
-        "multiple_cap_applied":             f"{multiple_cap}x annual income ({coverage_type})",
-        "cap_sgd":                          round(cap_sgd, 2) if income else None,
+        "multiple_cap_applied":             cap_display,
+        "cap_sgd":                          round(cap_sgd, 2) if isinstance(cap_sgd, (int, float)) and cap_sgd != float("inf") else None,
         "breach":                           breach,
         "verdict":                          "OVER_AGGREGATE" if breach else "WITHIN_CAP",
         "regulator_ref":                    "LIA best practice · MAS macro-prudential guidance",
