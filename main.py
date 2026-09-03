@@ -331,9 +331,16 @@ def lifeasia_get_proposal(application_id: str) -> Dict[str, Any]:
         "submitted_at": case["submitted_at"],
         "policyholder_nric": person["nric"] if person else None,
         "policyholder_name": person["full_name"] if person else None,
+        "person_id": case.get("person_id"),
         "product_code": case["product_code"],
+        "product_name": case.get("product_name"),
+        "coverage_type": case.get("coverage_type"),
         "sum_assured_sgd": case["sum_assured_sgd"],
+        "premium_frequency": case.get("premium_frequency"),
+        "proposed_annual_premium_sgd": case.get("proposed_annual_premium_sgd"),
+        "riders": case.get("riders", []),
         "disclosures": case["disclosures"],
+        "supporting_documents": case.get("supporting_documents", []),
         "channel": case["channel"],
     }
 
