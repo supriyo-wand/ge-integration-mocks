@@ -1594,11 +1594,25 @@ def medical_evidence_trigger(
     adverse_disclosure: bool  = Query(False),
     bmi:                float = Query(22.0),
 ) -> Dict[str, Any]:
-    """LIA Guide 2024 v3.0 sum-assured band table. Deterministic mapping of
-    (sum assured × age × smoker × disclosure) → evidence pack required."""
+    """LIA Guide 2024 v3.0 sum-assured band table with accelerated underwriting
+    fast-track for clean risks. Real insurers apply predictive analytics to
+    pre-clear clean disclosures below SGD 2M without a paramedical."""
     evidence: List[str] = []
+
+    # Accelerated-underwriting fast-track:
+    # If disclosure is clean (no adverse markers, healthy BMI, non-smoker) and
+    # age is under 55, skip evidence collection up to SGD 2M.
+    clean_risk = (
+        not adverse_disclosure
+        and not smoker
+        and 18 <= (bmi or 22) <= 27.5
+        and age < 55
+    )
+
     if sum_assured_sgd < 500_000:
         band = "Simplified issue"
+    elif clean_risk and sum_assured_sgd <= 2_000_000:
+        band = "Accelerated underwriting (fast-track)"
     elif sum_assured_sgd < 1_000_000:
         band = "Non-medical (Questionnaire)"
         evidence.append("Reflexive medical questionnaire")
@@ -1611,9 +1625,9 @@ def medical_evidence_trigger(
     else:
         band = "Jumbo medical"
         evidence += ["Full medical examination (physician-led)", "Blood profile", "Resting ECG", "Treadmill ECG", "Financial questionnaire"]
-    if age >= 55 and "Blood profile" not in evidence:
+    if age >= 55 and "Blood profile" not in evidence and band != "Simplified issue":
         evidence.append("Blood profile (age-driven trigger)")
-    if age >= 55 and "Resting ECG" not in evidence:
+    if age >= 55 and "Resting ECG" not in evidence and band != "Simplified issue":
         evidence.append("Resting ECG (age-driven trigger)")
     if smoker and sum_assured_sgd >= 500_000:
         evidence.append("Cotinine test (smoker declaration)")
@@ -1625,12 +1639,13 @@ def medical_evidence_trigger(
         "evaluated_at":       _now(),
         "sum_assured_sgd":    sum_assured_sgd,
         "band":               band,
+        "clean_risk_fast_track": clean_risk and sum_assured_sgd <= 2_000_000,
         "evidence_required":  evidence,
         "medical_required":   any(e.startswith(("Paramedical", "Full medical", "Jumbo")) for e in evidence),
         "aps_required":       "Attending Physician Statement (APS)" in evidence,
         "already_on_file":    False,
-        "postpone_recommended": bool(evidence) and band not in ("Simplified issue",),
-        "regulator_ref":      "LIA Guide to Medical Underwriting Apr 2024 v3.0 · Sum-assured band table",
+        "postpone_recommended": bool(evidence) and band not in ("Simplified issue", "Accelerated underwriting (fast-track)"),
+        "regulator_ref":      "LIA Guide to Medical Underwriting Apr 2024 v3.0 · Sum-assured band table + accelerated-UW industry practice",
     }
 
 
