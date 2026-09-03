@@ -204,6 +204,8 @@ CLAIM_SUBMISSIONS: Dict[str, Dict[str, Any]] = {}  # claim_id -> submission reco
 UW_SUBMISSIONS: Dict[str, Dict[str, Any]] = {}     # application_id -> submission record
 AUDIT_LEDGER: List[Dict[str, Any]] = []            # append-only FEAT trail
 PAYOUTS: Dict[str, Dict[str, Any]] = {}            # payout_id -> record
+CROSS_WORKFLOW_SIGNALS: List[Dict[str, Any]] = []  # append-only shared store
+BOUND_POLICIES: Dict[str, Dict[str, Any]] = {}     # policy_id -> newly-bound record
 
 
 def _now() -> str:
@@ -247,6 +249,7 @@ def health() -> Dict[str, Any]:
         "/lia-medical", "/cbs", "/feat-audit", "/payout",
         "/document-check", "/medical-coding", "/fraud-pool",
         "/coverage-check", "/contestability-review",
+        "/cross-workflow", "/lifeasia/bind-policy",
     ]}
 
 
@@ -270,6 +273,8 @@ def index() -> Dict[str, Any]:
             "/fraud-pool":     "Fraud scoring engine",
             "/coverage-check": "IP tier · claim-type coverage · ward class · provider network · waiting period · annual limit",
             "/contestability-review": "Insurance Act s21 re-underwriting verdict per claim",
+            "/cross-workflow": "Signal bus between Claims and Underwriting cycles",
+            "/lifeasia/bind-policy": "Underwriting binds a newly-issued policy record here",
         },
     }
 
@@ -1258,6 +1263,138 @@ def cr_check(claim_id: str) -> Dict[str, Any]:
 
 
 # ===========================================================================
+# 14. CROSS-WORKFLOW SIGNAL STORE — shared append-only bus between Claims & Underwriting
+# ===========================================================================
+XW = "/cross-workflow"
+
+
+class CrossWorkflowSignal(BaseModel):
+    workflow:                 str                             # emitter: "claims" | "underwriting"
+    cycle_id:                 str
+    target_workflow:          str                             # "claims" | "underwriting" | "both"
+    signal_type:              str                             # contestability_finding | siu_watchlist | coverage_exclusion | fraud_pattern | policy_binding | policy_watch
+    subject_policy_or_nric:   str
+    note:                     str
+    expires_at:               Optional[str] = None            # ISO string; when None, no expiry
+
+
+@app.get(f"{XW}", tags=["cross-workflow"])
+def xw_root() -> Dict[str, Any]:
+    return {
+        "service": "Cross-workflow Signal Store",
+        "note": "Append-only bus that Claims and Underwriting use to hand risk state between each other. Signals are the connective tissue: a contestability finding on Claims raises the underwriting bar on the same customer's next proposal.",
+        "signal_count": len(CROSS_WORKFLOW_SIGNALS),
+    }
+
+
+@app.post(f"{XW}/signals", tags=["cross-workflow"])
+def xw_emit(sig: CrossWorkflowSignal) -> Dict[str, Any]:
+    """Emit a cross-workflow signal. Called by the emitting workflow when
+    something interesting happens that the other workflow should know."""
+    with _state_lock:
+        seq = len(CROSS_WORKFLOW_SIGNALS) + 1
+        record = {
+            "seq":                    seq,
+            "emitted_at":             _now(),
+            "workflow":               sig.workflow,
+            "cycle_id":               sig.cycle_id,
+            "target_workflow":        sig.target_workflow,
+            "signal_type":            sig.signal_type,
+            "subject_policy_or_nric": sig.subject_policy_or_nric,
+            "note":                   sig.note,
+            "expires_at":             sig.expires_at,
+        }
+        CROSS_WORKFLOW_SIGNALS.append(record)
+    return {"acknowledged": True, "seq": seq, "emitted_at": record["emitted_at"]}
+
+
+@app.get(f"{XW}/signals", tags=["cross-workflow"])
+def xw_list(
+    target_workflow: Optional[str] = Query(None, description="Filter to signals for this workflow"),
+    subject:         Optional[str] = Query(None, description="Filter to signals about this NRIC or policy_id"),
+    signal_type:     Optional[str] = Query(None, description="Filter to a single signal type"),
+    limit:           int = Query(100, ge=1, le=1000),
+) -> Dict[str, Any]:
+    """List cross-workflow signals filtered by target workflow and/or subject."""
+    items = CROSS_WORKFLOW_SIGNALS
+    if target_workflow:
+        items = [s for s in items if s.get("target_workflow") in (target_workflow, "both")]
+    if subject:
+        items = [s for s in items if s.get("subject_policy_or_nric") == subject]
+    if signal_type:
+        items = [s for s in items if s.get("signal_type") == signal_type]
+    return {"count": len(items), "signals": items[-limit:]}
+
+
+# ===========================================================================
+# 15. LIFEASIA · BIND-POLICY — underwriting writes a newly-issued policy here
+# ===========================================================================
+# (Extends the existing /lifeasia namespace)
+
+
+class BindPolicyRequest(BaseModel):
+    application_id:              str
+    person_id:                   str
+    product_code:                str
+    product_family:              str
+    coverage_type:               str
+    sum_assured_sgd:             float
+    proposed_annual_premium_sgd: float
+    loading_pct:                 int = 0
+    rate_class:                  str
+    table_rating:                Optional[str] = None
+    riders:                      List[str] = []
+    effective_date:              Optional[str] = None
+
+
+@app.post(f"{LA}/bind-policy", tags=["lifeasia"])
+def lifeasia_bind_policy(req: BindPolicyRequest) -> Dict[str, Any]:
+    """Create a new in-force policy record from an approved underwriting
+    application. Mirrors the shape a FINEOS Policy Administration bind
+    call would return (policy id, effective date, first premium due)."""
+    import datetime
+    person = PEOPLE.get(req.person_id) or {}
+    with _state_lock:
+        seq = 20000 + len(BOUND_POLICIES) + 1
+        # Naming: IP-YYYY-NNNNNNN mirroring the existing registry shape.
+        policy_id = f"IP-2026-{seq:07d}"
+        eff = req.effective_date or datetime.date.today().strftime("%Y-%m-%d")
+        first_premium_due = eff
+        final_premium = round(req.proposed_annual_premium_sgd * (1 + req.loading_pct / 100.0), 2)
+        record = {
+            "policy_id":            policy_id,
+            "person_id":            req.person_id,
+            "policyholder_nric":    person.get("nric", ""),
+            "policyholder_name":    person.get("full_name", ""),
+            "product_code":         req.product_code,
+            "product_family":       req.product_family,
+            "coverage_type":        req.coverage_type,
+            "sum_assured_sgd":      req.sum_assured_sgd,
+            "annual_premium_sgd":   final_premium,
+            "loading_pct":          req.loading_pct,
+            "rate_class":           req.rate_class,
+            "table_rating":         req.table_rating,
+            "riders":               req.riders,
+            "inception_date":       eff,
+            "first_premium_due":    first_premium_due,
+            "next_premium_due":     eff,
+            "status":               "IN_FORCE",
+            "life_asia_source_ref": f"LA_POLADM.PLC_{policy_id}",
+            "sourced_from_app":     req.application_id,
+            "bound_at":             _now(),
+        }
+        BOUND_POLICIES[policy_id] = record
+        POLICY_REGISTRY[policy_id] = record  # so subsequent GETs find it
+    return record
+
+
+@app.get(f"{LA}/bound-policies", tags=["lifeasia"])
+def lifeasia_list_bound() -> Dict[str, Any]:
+    """Everything the current session's underwriting cycle has bound."""
+    return {"count": len(BOUND_POLICIES), "policies": list(BOUND_POLICIES.values())}
+
+
+# ===========================================================================
 # Reset (demo housekeeping)
 # ===========================================================================
 @app.post("/reset", tags=["_meta"])
@@ -1267,4 +1404,6 @@ def reset() -> Dict[str, Any]:
         UW_SUBMISSIONS.clear()
         AUDIT_LEDGER.clear()
         PAYOUTS.clear()
+        CROSS_WORKFLOW_SIGNALS.clear()
+        # keep BOUND_POLICIES so bound policies survive a reset (real behavior)
     return {"reset": True, "at": _now()}
