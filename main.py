@@ -1533,7 +1533,7 @@ def aggregation_check(
         if p.get("nric") == nric:
             person = p
             break
-    income = float((person or {}).get("annual_income_sgd_from_iras", 0) or 0)
+    income = float((person or {}).get("annual_income_sgd_from_iras") or (person or {}).get("annual_income_sgd") or 0)
     existing_policies = [p for p in POLICY_REGISTRY.values() if p.get("policyholder_nric") == nric]
     existing_own_sum_assured = sum(float(p.get("sum_assured_sgd") or 0) for p in existing_policies)
     shared_pool_exposure = float(LIA_SHARED_POOL_EXPOSURE_SGD.get(nric, 0))
